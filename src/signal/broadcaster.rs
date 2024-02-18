@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, Waker, Context};
 use futures_util::task::{self, ArcWake};
+
+// todo! make this optional under a feature
+use weak_table::traits::WeakElement;
 use crate::signal::ChangedWaker;
 
 
@@ -266,6 +269,12 @@ impl<A> Broadcaster<A> where A: Signal, A::Item: Clone {
             state: BroadcasterState::new(&self.shared_state),
         }
     }
+
+    pub fn downgrade_cloned(&self) -> WeakBroadcasterCloned<A> {
+      WeakBroadcasterCloned {
+          shared_state: Arc::downgrade(&self.shared_state),
+      }
+  }
 }
 
 // TODO use derive
@@ -384,4 +393,41 @@ impl<A, F> Debug for BroadcasterSignalRef<A, F>
             .field("state", &self.state)
             .finish()
     }
+}
+
+// todo! make this optional under a feature
+
+// --------------------------------------------------------------------------
+
+/// A weak reference to a `Broadcaster`, which can be upgraded to a `Broadcaster` for signals where Item is Clone.
+/// 
+/// Since it implements WeakElement you can use it in WeakValueHashMap<Key, WeakBroadcaster<A>>.
+/// 
+#[derive(Clone, Debug)]
+pub struct WeakBroadcasterCloned<A> where A: Signal, A::Item: Clone {
+  // ticked : Arc<AtomicI32>,
+  shared_state: Weak<BroadcasterSharedState<A>>,
+}
+impl <A> WeakBroadcasterCloned<A> where A: Signal, A::Item: Clone {
+  pub fn upgrade(&self) -> Option<Broadcaster<A>> {
+    self.shared_state.upgrade().map(|shared_state| Broadcaster { shared_state })
+  }
+}
+impl<A> WeakElement for WeakBroadcasterCloned<A> where A: Signal, A::Item: Clone {
+  type Strong = Broadcaster<A>;
+  fn new(view: &Self::Strong) -> Self {
+     view.downgrade_cloned()
+  }
+  fn view(&self) -> Option<Self::Strong> {
+      self.upgrade()
+  }
+  fn clone(view: &Self::Strong) -> Self::Strong
+          where Self: Sized {
+      view.clone()
+  }
+  
+  fn is_expired(&self) -> bool {
+    self.shared_state.upgrade().is_none()
+  }
+
 }

@@ -1,4 +1,9 @@
 mod macros;
+// TODO resolve properly
+#[allow(unreachable_pub)]
+#[allow(unused_imports)]
+pub use self::macros::*;
+
 
 mod broadcaster;
 pub use self::broadcaster::*;

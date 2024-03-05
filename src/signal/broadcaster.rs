@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::marker::Unpin;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::sync::atomic::{AtomicBool, Ordering};
+// use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, Waker, Context};
 use futures_util::task::{self, ArcWake};
 
@@ -16,14 +16,14 @@ use crate::signal::ChangedWaker;
 /// then wake up all of the child ChangedWaker.
 #[derive(Debug)]
 struct BroadcasterNotifier {
-    is_changed: AtomicBool,
+    // is_changed: AtomicBool,
     wakers: Mutex<Vec<Weak<ChangedWaker>>>,
 }
 
 impl BroadcasterNotifier {
     fn new() -> Self {
         Self {
-            is_changed: AtomicBool::new(true),
+            // is_changed: AtomicBool::new(true),
             wakers: Mutex::new(vec![]),
         }
     }
@@ -31,7 +31,7 @@ impl BroadcasterNotifier {
     fn notify(&self) {
         let mut lock = self.wakers.lock().unwrap();
 
-        self.is_changed.store(true, Ordering::SeqCst);
+        // self.is_changed.store(true, Ordering::SeqCst);
 
         // Take this opportunity to GC dead wakers
         lock.retain(|waker| {
@@ -45,9 +45,9 @@ impl BroadcasterNotifier {
         });
     }
 
-    fn is_changed(&self) -> bool {
-        self.is_changed.swap(false, Ordering::SeqCst)
-    }
+    // fn is_changed(&self) -> bool {
+    //     self.is_changed.swap(false, Ordering::SeqCst)
+    // }
 }
 
 impl ArcWake for BroadcasterNotifier {
@@ -129,18 +129,18 @@ impl<A> BroadcasterSharedState<A> where A: Signal {
     }
 
     fn poll<B, F>(&self, f: F) -> B where F: FnOnce(&BroadcasterInnerState<A>) -> B {
-        if self.notifier.is_changed() {
+        // if self.notifier.is_changed() {
             let mut lock = self.inner.write().unwrap();
 
             lock.poll_signal();
 
             f(&lock)
 
-        } else {
-            let lock = self.inner.read().unwrap();
+        // } else {
+        //     let lock = self.inner.read().unwrap();
 
-            f(&lock)
-        }
+        //     f(&lock)
+        // }
     }
 }
 

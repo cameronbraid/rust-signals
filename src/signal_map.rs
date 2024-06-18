@@ -112,10 +112,6 @@ pub trait SignalMapExt: SignalMap {
 
 
     #[inline]
-    // fn filter_cloned(self, key: Self::Key) -> MapWatchKeySignal<Self>
-    //     where Self::Key: PartialEq,
-    //           Self::Value: Clone,
-    //           Self: Sized {
     fn filter_cloned<F>(self, callback: F) -> Filter<Self, F>
         where F: FnMut(&Self::Key, &Self::Value) -> bool,
               Self::Key : Clone + Eq + Hash + Ord,
@@ -1092,84 +1088,83 @@ where
     type Value = A::Value;
 
     // TODO should this inline ?
+
+    // fn poll_vec_change(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<VecDiff<Self::Item>>> {
+// 
     #[inline]
     fn poll_map_change(
         self: Pin<&mut Self>,
         cx: &mut Context,
     ) -> Poll<Option<MapDiff<Self::Key, Self::Value>>> {
-        let crate::signal_map::FilterKeyProj {
-            signal,
+        let FilterKeyProj {
+            mut signal,
             callback,
             forwarded_keys,
         } = self.project();
 
-        match signal.poll_map_change(cx) {
+        loop {
+          return match signal.as_mut().poll_map_change(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(polled_ready) => match polled_ready {
-                Some(polled_map_diff) => {
-                    let maybe_out_diff = match polled_map_diff {
-                        MapDiff::Replace { entries } => {
-                            forwarded_keys.clear();
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(Some(change)) => match change {
+                MapDiff::Replace { entries } => {
+                  
+                    let entries = entries
+                      .into_iter()
+                      .filter(|entry| callback(&entry.0, &entry.1))
+                      .collect::<Vec<_>>();
+                    
+                    *forwarded_keys = entries.iter().map(|(k, _v)| {
+                        (*k).clone()
+                    }).collect();
 
-                            let entries = entries
-                                .into_iter()
-                                .filter(|entry| callback(&entry.0, &entry.1))
-                                .collect::<Vec<_>>();
+                    Poll::Ready(Some(MapDiff::Replace { entries }))
+                  }
+                  MapDiff::Insert { key, value }  => {
+                      if callback(&key, &value) {
+                          forwarded_keys.insert(key.clone());
 
-                            entries.iter().for_each(|(k, _v)| {
-                                forwarded_keys.insert((*k).clone());
-                            });
+                          Poll::Ready(Some(MapDiff::Insert { key, value }))
+                      } else {
+                          if forwarded_keys.remove(&key) {
+                            Poll::Ready(Some(MapDiff::Remove { key }))
+                          } else {
+                              continue;
+                          }
+                      }
+                  }
+                  MapDiff::Update { key, value } => {
+                      if callback(&key, &value) {
+                          forwarded_keys.insert(key.clone());
 
-                            Some(MapDiff::Replace { entries })
-                        }
-                        MapDiff::Insert { key, value } => {
-                            if callback(&key, &value) {
-                                forwarded_keys.insert(key.clone());
-
-                                Some(MapDiff::Insert { key, value })
-                            } else {
-                                if forwarded_keys.remove(&key) {
-                                    Some(MapDiff::Remove { key })
-                                } else {
-                                    None
-                                }
-                            }
-                        }
-                        MapDiff::Update { key, value } => {
-                            if callback(&key, &value) {
-                                forwarded_keys.insert(key.clone());
-
-                                Some(MapDiff::Update { key, value })
-                            } else {
-                                if forwarded_keys.remove(&key) {
-                                    Some(MapDiff::Remove { key })
-                                } else {
-                                    None
-                                }
-                            }
-                        }
-                        MapDiff::Remove { key } => {
-                            if forwarded_keys.remove(&key) {
-                                Some(MapDiff::Remove { key })
-                            } else {
-                                None
-                            }
-                        }
-                        MapDiff::Clear {} => {
-                            forwarded_keys.clear();
-
-                            Some(MapDiff::Clear {})
-                        }
-                    };
-
-                    if maybe_out_diff.is_some() {
-                        Poll::Ready(maybe_out_diff)
-                    } else {
-                        Poll::Pending
-                    }
-                }
-                None => Poll::Ready(None),
-            },
+                          Poll::Ready(Some(MapDiff::Update { key, value }))
+                      } else {
+                          if forwarded_keys.remove(&key) {
+                              Poll::Ready(Some(MapDiff::Remove { key }))
+                          } else {
+                              continue;
+                          }
+                      }
+                  }
+                  MapDiff::Remove { key } => {
+                      if forwarded_keys.remove(&key) {
+                          Poll::Ready(Some(MapDiff::Remove { key }))
+                      } else {
+                          continue;
+                      }
+                  }
+                  MapDiff::Clear {} => {
+                      let len = forwarded_keys.len();
+                      forwarded_keys.clear();
+                      if len > 0 {
+                          Poll::Ready(Some(MapDiff::Clear {}))
+                      } 
+                      else {
+                        continue;
+                      }
+                  }
+              }
+            }
         }
     }
 
@@ -1201,45 +1196,46 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context,
     ) -> Poll<Option<VecDiff<Self::Item>>> {
+    
       let SignalMapEntriesProj {
-       mut signal,
-       keys,
-    } = self.project();
+          mut signal,
+          keys,
+      } = self.project();
 
-      signal.poll_map_change_unpin(cx).map(|opt| {
-            opt.map(|diff| {
-                match diff {
-                    MapDiff::Replace { entries } => {
-                        // TODO verify that it is in sorted order ?
-                        *keys = entries.iter().map(|(k, _)| k.clone()).collect();
-                        VecDiff::Replace { values: entries }
-                    }
-                    MapDiff::Insert { key, value } => {
-                        let index = keys.binary_search(&key).unwrap_err();
-                        keys.insert(index, key.clone());
-                        VecDiff::InsertAt {
-                            index,
-                            value: (key, value),
-                        }
-                    }
-                    MapDiff::Update { key, value } => {
-                        let index = keys.binary_search(&key).unwrap();
-                        VecDiff::UpdateAt {
-                            index,
-                            value: (key, value),
-                        }
-                    }
-                    MapDiff::Remove { key } => {
-                        let index = keys.binary_search(&key).unwrap();
-                        keys.remove(index);
-                        VecDiff::RemoveAt { index }
-                    }
-                    MapDiff::Clear {} => {
-                        keys.clear();
-                        VecDiff::Clear {}
-                    }
-                }
-            })
-        })
+      match signal.as_mut().poll_map_change(cx) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(None) => Poll::Ready(None),
+        Poll::Ready(Some(change)) => Poll::Ready(Some(match change {
+          MapDiff::Replace { entries } => {
+              // TODO verify that it is in sorted order ?
+              *keys = entries.iter().map(|(k, _)| k.clone()).collect();
+              VecDiff::Replace { values: entries }
+          }
+          MapDiff::Insert { key, value } => {
+              let index = keys.binary_search(&key).unwrap_err();
+              keys.insert(index, key.clone());
+              VecDiff::InsertAt {
+                  index,
+                  value: (key, value),
+              }
+          }
+          MapDiff::Update { key, value } => {
+              let index = keys.binary_search(&key).unwrap();
+              VecDiff::UpdateAt {
+                  index,
+                  value: (key, value),
+              }
+          }
+          MapDiff::Remove { key } => {
+              let index = keys.binary_search(&key).unwrap();
+              keys.remove(index);
+              VecDiff::RemoveAt { index }
+          }
+          MapDiff::Clear {} => {
+              keys.clear();
+              VecDiff::Clear {}
+          }
+        }))
+      }
     }
 }

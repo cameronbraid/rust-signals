@@ -1191,7 +1191,7 @@ pub struct SignalMapEntries<A:SignalMap> {
 
 impl<A : SignalMap> SignalVec for SignalMapEntries<A>
 where
-    A::Key : Clone + Eq + Hash + Ord,
+    A::Key : Clone + Ord,
     A::Value : Clone,
 {
     type Item = (A::Key, A::Value);

@@ -1,6 +1,8 @@
 use crate::signal::Signal;
+use crate::signal_vec::{SignalVec, VecDiff};
 use std::cmp::Ord;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::hash::Hash;
 use std::pin::Pin;
 use std::marker::Unpin;
 use std::future::Future;
@@ -98,6 +100,28 @@ impl<A> SignalMap for Pin<A>
 
 // TODO Seal this
 pub trait SignalMapExt: SignalMap {
+
+    #[inline]
+    fn entries_cloned(self) -> SignalMapEntries<Self>
+    where Self: Sized {
+        SignalMapEntries {
+            signal: self,
+            keys: Vec::new(),
+        }
+    }
+
+
+    #[inline]
+    fn filter<F>(self, callback: F) -> Filter<Self, F>
+        where F: FnMut(&Self::Key, &Self::Value) -> bool,
+              Self: Sized {
+        Filter {
+            signal: self,
+            callback,
+            forwarded_keys: HashSet::new(),
+        }
+    }
+
     #[inline]
     fn map_value<A, F>(self, callback: F) -> MapValue<Self, F>
         where F: FnMut(Self::Value) -> A,
@@ -1041,3 +1065,175 @@ mod mutable_btree_map {
 }
 
 pub use self::mutable_btree_map::*;
+
+#[pin_project(project = FilterKeyProj)]
+#[derive(Debug)]
+#[must_use = "SignalMaps do nothing unless polled"]
+pub struct Filter<A: SignalMap, B> {
+    #[pin]
+    signal: A,
+    callback: B,
+    forwarded_keys: HashSet<A::Key>,
+}
+
+impl<A, F> SignalMap for Filter<A, F>
+where
+    A: SignalMap,
+    A::Key: Clone + Eq + Hash,
+    F: FnMut(&A::Key, &A::Value) -> bool,
+{
+    type Key = A::Key;
+    type Value = A::Value;
+
+    // TODO should this inline ?
+    #[inline]
+    fn poll_map_change(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Option<MapDiff<Self::Key, Self::Value>>> {
+        let crate::signal_map::FilterKeyProj {
+            signal,
+            callback,
+            forwarded_keys,
+        } = self.project();
+
+        match signal.poll_map_change(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(polled_ready) => match polled_ready {
+                Some(polled_map_diff) => {
+                    let maybe_out_diff = match polled_map_diff {
+                        MapDiff::Replace { entries } => {
+                            forwarded_keys.clear();
+
+                            let entries = entries
+                                .into_iter()
+                                .filter(|entry| callback(&entry.0, &entry.1))
+                                .collect::<Vec<_>>();
+
+                            entries.iter().for_each(|(k, _v)| {
+                                forwarded_keys.insert((*k).clone());
+                            });
+
+                            Some(MapDiff::Replace { entries })
+                        }
+                        MapDiff::Insert { key, value } => {
+                            if callback(&key, &value) {
+                                forwarded_keys.insert(key.clone());
+
+                                Some(MapDiff::Insert { key, value })
+                            } else {
+                                if forwarded_keys.remove(&key) {
+                                    Some(MapDiff::Remove { key })
+                                } else {
+                                    None
+                                }
+                            }
+                        }
+                        MapDiff::Update { key, value } => {
+                            if callback(&key, &value) {
+                                forwarded_keys.insert(key.clone());
+
+                                Some(MapDiff::Update { key, value })
+                            } else {
+                                if forwarded_keys.remove(&key) {
+                                    Some(MapDiff::Remove { key })
+                                } else {
+                                    None
+                                }
+                            }
+                        }
+                        MapDiff::Remove { key } => {
+                            if forwarded_keys.remove(&key) {
+                                Some(MapDiff::Remove { key })
+                            } else {
+                                None
+                            }
+                        }
+                        MapDiff::Clear {} => {
+                            forwarded_keys.clear();
+
+                            Some(MapDiff::Clear {})
+                        }
+                    };
+
+                    if maybe_out_diff.is_some() {
+                        Poll::Ready(maybe_out_diff)
+                    } else {
+                        Poll::Pending
+                    }
+                }
+                None => Poll::Ready(None),
+            },
+        }
+    }
+
+
+}
+
+// pub struct Filter<A: SignalMap, B> {
+//   #[pin]
+//   signal: A,
+
+#[pin_project(project = SignalMapEntriesProj)]
+#[derive(Debug)]
+#[must_use = "SignalVecs do nothing unless polled"]
+pub struct SignalMapEntries<A:SignalMap> {
+    #[pin]
+    pub signal: A,
+    pub keys: Vec<A::Key>,
+}
+
+impl<A : SignalMap> SignalVec for SignalMapEntries<A>
+where
+    A::Key : Clone + Eq + Hash + Ord,
+    A::Value : Clone,
+{
+    type Item = (A::Key, A::Value);
+
+    #[inline]
+    fn poll_vec_change(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Option<VecDiff<Self::Item>>> {
+      let SignalMapEntriesProj {
+       mut signal,
+       keys,
+    } = self.project();
+
+      signal.poll_map_change_unpin(cx).map(|opt| {
+            opt.map(|diff| {
+                match diff {
+                    MapDiff::Replace { entries } => {
+                        // TODO verify that it is in sorted order ?
+                        *keys = entries.iter().map(|(k, _)| k.clone()).collect();
+                        VecDiff::Replace { values: entries }
+                    }
+                    MapDiff::Insert { key, value } => {
+                        let index = keys.binary_search(&key).unwrap_err();
+                        keys.insert(index, key.clone());
+                        VecDiff::InsertAt {
+                            index,
+                            value: (key, value),
+                        }
+                    }
+                    MapDiff::Update { key, value } => {
+                        let index = keys.binary_search(&key).unwrap();
+                        VecDiff::UpdateAt {
+                            index,
+                            value: (key, value),
+                        }
+                    }
+                    MapDiff::Remove { key } => {
+                        let index = keys.binary_search(&key).unwrap();
+                        keys.remove(index);
+                        VecDiff::RemoveAt { index }
+                    }
+                    MapDiff::Clear {} => {
+                        keys.clear();
+                        VecDiff::Clear {}
+                    }
+                }
+            })
+        })
+    }
+}

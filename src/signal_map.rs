@@ -112,8 +112,14 @@ pub trait SignalMapExt: SignalMap {
 
 
     #[inline]
-    fn filter<F>(self, callback: F) -> Filter<Self, F>
+    // fn filter_cloned(self, key: Self::Key) -> MapWatchKeySignal<Self>
+    //     where Self::Key: PartialEq,
+    //           Self::Value: Clone,
+    //           Self: Sized {
+    fn filter_cloned<F>(self, callback: F) -> Filter<Self, F>
         where F: FnMut(&Self::Key, &Self::Value) -> bool,
+              Self::Key : Clone + Eq + Hash + Ord,
+              Self::Value : Clone,
               Self: Sized {
         Filter {
             signal: self,
